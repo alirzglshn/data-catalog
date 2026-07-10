@@ -1,0 +1,17 @@
+# minimal configuration for a container-local relay, not intended to
+# receive mail from outside the docker network or deliver to the
+# public internet, django is the only expected client
+
+myhostname = postfix
+mydomain = datacatalog.local
+myorigin = $mydomain
+
+# accept mail only from the docker compose network, not from the
+# public internet
+inet_interfaces = all
+mynetworks = 127.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+
+# relay everything for any domain rather than only $mydomain, this
+# container is a dev/demo relay, not a production mail server
+relayhost =
+mydestination = $myhostname, localhost.$mydomain, localhost

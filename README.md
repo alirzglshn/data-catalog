@@ -1,6 +1,6 @@
-# mini data catalog
+# Mini data catalog
 
-a small metadata catalog service. it tracks which database schemas
+A small metadata catalog service. it tracks which database schemas
 exist, which tables live in each schema, and which etl job is
 responsible for loading each table. tables, schemas and etl jobs are
 related through real foreign keys rather than free-text columns.

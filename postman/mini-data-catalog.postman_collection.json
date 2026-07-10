@@ -1,0 +1,120 @@
+{
+  "info": {
+    "name": "Mini Data Catalog API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "access_token", "value": "" },
+    { "key": "refresh_token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "auth",
+      "item": [
+        {
+          "name": "obtain token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('access_token', body.access);",
+                  "pm.collectionVariables.set('refresh_token', body.refresh);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"changeme\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/auth/token/"
+          }
+        },
+        {
+          "name": "refresh token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('access_token', body.access);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/auth/token/refresh/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "catalog",
+      "item": [
+        {
+          "name": "ingest tables (json)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tables\": [\n    { \"name\": \"customers\", \"schema_name\": \"sales\", \"etl_name\": \"etl1\" },\n    { \"name\": \"orders\", \"schema_name\": \"sales\", \"etl_name\": \"etl2\" }\n  ]\n}"
+            },
+            "url": "{{base_url}}/api/v1/catalog/ingest/"
+          }
+        },
+        {
+          "name": "ingest tables (csv upload)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "attach a csv file with header: name,schema_name,etl_name before sending"
+                }
+              ]
+            },
+            "url": "{{base_url}}/api/v1/catalog/ingest/"
+          }
+        },
+        {
+          "name": "tables for an etl job",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/api/v1/catalog/etl-tables/?etl_name=etl1"
+          }
+        },
+        {
+          "name": "tables for an unknown etl job (expect 404)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/api/v1/catalog/etl-tables/?etl_name=does-not-exist"
+          }
+        }
+      ]
+    }
+  ]
+}
