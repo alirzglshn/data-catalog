@@ -1,9 +1,4 @@
 """tests for the per-schema summary (join/aggregation) endpoint
-
-these confirm the annotated counts coming back from
-catalog.services.schema_summary_queryset are correct, in particular
-that etl_count reflects distinct etl jobs rather than the number of
-joined table rows
 """
 
 import pytest

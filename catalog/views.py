@@ -44,10 +44,6 @@ logger = logging.getLogger(__name__)
 
 class IngestTablesView(APIView):
     """loads table/schema/etl metadata from an uploaded csv or json body
-
-    a multipart csv file takes precedence when both a file and a json
-    body happen to be present on the same request, since a file
-    upload is the more explicit signal of intent
     """
 
     parser_classes = [MultiPartParser, JSONParser]
@@ -99,30 +95,11 @@ class IngestTablesView(APIView):
                 fail_silently=False,
             )
         except (smtplib.SMTPException, OSError):
-            # a down/misconfigured relay is an ops concern to fix in
-            # monitoring, not a reason to fail an otherwise successful
-            # ingestion request that already committed to the database
             logger.exception("failed to send ingestion notification email")
 
 
 class DirectDatabaseIngestView(APIView):
     """reads schema/table metadata straight from an external database
-
-    and registers it in the catalog, the counterpart to
-    IngestTablesView for the case where the caller wants to point at
-    a live postgres or oracle database rather than upload rows
-
-    the request body carries connection details plus a single
-    etl_name to attribute every discovered table to, see
-    ExternalConnectionSerializer for the exact shape. every table
-    the connecting user can see is registered, there is no filtering
-    by name pattern, that can be layered on later if a real load only
-    ever wants a subset
-
-    a connection or query failure against the external database
-    returns 502, not 500, the catalog's own database and this
-    request's processing are both fine, it is specifically the
-    remote/upstream side that failed
     """
 
     def post(self, request, *args, **kwargs):
@@ -151,11 +128,6 @@ class DirectDatabaseIngestView(APIView):
 
 class EtlTablesView(ListAPIView):
     """given ?etl_name=..., returns the tables that etl job populates
-
-    an unknown etl_name is a 404 rather than an empty list, since
-    those two situations mean different things to the caller: one is
-    "this job has not loaded anything yet", the other is "this job
-    does not exist in the catalog at all"
     """
 
     serializer_class = TableNameSerializer
@@ -175,12 +147,6 @@ class EtlTablesView(ListAPIView):
 
 class SchemaSummaryView(ListAPIView):
     """per-schema rollup of table count and distinct etl jobs used
-
-    deliberate multi-table join example: a single annotated query
-    across Schema, TableName, and Etl (see
-    catalog.services.schema_summary_queryset), rather than the view
-    fetching schemas and then looping to count tables/etl jobs one
-    schema at a time
     """
 
     serializer_class = SchemaSummarySerializer

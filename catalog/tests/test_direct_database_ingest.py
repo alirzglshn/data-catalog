@@ -1,11 +1,4 @@
 """tests for the direct-database ingestion endpoint
-
-the external database connection is mocked throughout, these tests
-are exercising the view/serializer/service wiring, not a real
-postgres or oracle driver, discover_external_tables itself is the
-thin seam where the real driver call happens and is covered by
-mocking catalog.services.discover_external_tables directly rather
-than mocking psycopg2/oracledb internals
 """
 
 from unittest.mock import patch

@@ -1,8 +1,4 @@
 """http-level tests for the catalog endpoints, including authentication.
-
-these go through the full request/response cycle via drf's APIClient,
-so they also catch url wiring, versioning, and permission mistakes
-that the service-level tests in test_services.py cannot see.
 """
 
 import io

@@ -1,6 +1,3 @@
-# the app is deployed as a plain wsgi app behind gunicorn, no
-# multi-stage build needed since the app has no compiled frontend
-# assets and psycopg2-binary avoids a build toolchain requirement
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

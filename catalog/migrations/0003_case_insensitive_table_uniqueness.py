@@ -1,18 +1,5 @@
 """replaces the case-sensitive composite unique constraint on
 TableName with a case-insensitive one.
-
-the unique_table_per_schema constraint from 0001 is a plain btree
-unique index over (schema_id, name), it allows "orders" and "Orders"
-to both be registered under the same schema as two distinct rows,
-which is the same class of bug fixed for Schema/Etl in 0002.
-
-the old constraint is dropped and replaced rather than kept alongside
-the new one, keeping both would mean two overlapping unique indexes
-enforcing almost the same thing, which only adds write overhead
-without adding any additional guarantee.
-
-written as raw sql since a functional expression, lower(name), is not
-something django's ORM-level UniqueConstraint can express directly.
 """
 
 from django.db import migrations

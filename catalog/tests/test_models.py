@@ -1,8 +1,4 @@
 """tests for model level constraints and foreign key behaviour.
-
-these exercise the database itself, confirming cascade/protect and
-the uniqueness rules actually hold, not just that the orm calls
-succeed.
 """
 
 import pytest

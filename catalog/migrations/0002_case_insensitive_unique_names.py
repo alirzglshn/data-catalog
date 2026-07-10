@@ -1,14 +1,4 @@
 """adds case-insensitive uniqueness on Schema.name and Etl.name.
-
-the plain unique=True index from 0001 is a case-sensitive btree index,
-it happily allows "Sales" and "sales" to exist as two different rows.
-that is a real data-quality bug for a catalog table, not just a
-missing performance index, so it is fixed here with a functional
-unique index over lower(name) instead.
-
-written as raw sql (RunSQL) rather than an orm field change, since
-django's UniqueConstraint has no direct way to express an index over
-an expression like lower(name), only over plain columns.
 """
 
 from django.db import migrations

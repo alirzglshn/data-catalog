@@ -125,7 +125,6 @@ SIMPLE_JWT = {
 }
 
 # email
-#
 # EMAIL_HOST defaults to the postfix container so the "send email
 # through postfix" requirement works out of the box with no external
 # account needed. setting EMAIL_HOST to an external smtp host such as

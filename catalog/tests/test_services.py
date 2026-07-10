@@ -1,8 +1,4 @@
 """tests for the parsing and upsert logic in catalog.services.
-
-kept independent of http, these call the plain functions directly so
-failures point straight at the parsing or upsert rule that broke
-rather than at a view or url.
 """
 
 import pytest

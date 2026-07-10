@@ -1,11 +1,4 @@
 """seeds the Etl table from a csv file of etl names.
-
-run as part of container start (see docker-compose.yml) so the five
-etl names shipped with the original task data are present before any
-ingestion request arrives, without this the first request to name an
-unrecognised etl would still work fine since ingest_rows creates
-missing Etl rows on the fly, this command just makes sure the known
-starting set exists ahead of time rather than only on first use
 """
 
 import csv
