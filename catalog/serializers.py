@@ -8,6 +8,7 @@ than by id since the id is an internal detail the caller never needs
 from rest_framework import serializers
 
 from catalog.models import Etl, Schema, TableName
+from catalog.services import SUPPORTED_ENGINES
 
 
 class SchemaSerializer(serializers.ModelSerializer):
@@ -43,3 +44,44 @@ class IngestionResultSerializer(serializers.Serializer):
     updated = serializers.IntegerField()
     etl_names = serializers.ListField(child=serializers.CharField())
     tables = TableNameSerializer(many=True)
+
+
+class ExternalConnectionSerializer(serializers.Serializer):
+    """validates the request body for the direct-database ingestion
+
+    endpoint. this only validates shape and type, not reachability,
+    whether the host/credentials actually work is only known once
+    catalog.services.discover_external_tables attempts the connection
+    at request time
+    """
+
+    engine = serializers.ChoiceField(choices=sorted(SUPPORTED_ENGINES))
+    host = serializers.CharField(max_length=255)
+    port = serializers.IntegerField(min_value=1, max_value=65535)
+    database = serializers.CharField(max_length=255)
+    user = serializers.CharField(max_length=255)
+    password = serializers.CharField(max_length=255, trim_whitespace=False)
+    etl_name = serializers.CharField(max_length=255)
+
+    def validate_etl_name(self, value):
+        etl_name = value.strip()
+        if not etl_name:
+            raise serializers.ValidationError("etl_name must not be blank")
+        return etl_name
+
+
+class SchemaSummarySerializer(serializers.ModelSerializer):
+    """per-schema rollup produced by catalog.services.schema_summary_queryset
+
+    table_count and etl_count are annotated onto the queryset by
+    schema_summary_queryset, not real model fields, so ModelSerializer
+    needs them declared explicitly here, listing them in Meta.fields
+    alone is not enough, it only auto-resolves actual model fields
+    """
+
+    table_count = serializers.IntegerField(read_only=True)
+    etl_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Schema
+        fields = ["id", "name", "table_count", "etl_count"]

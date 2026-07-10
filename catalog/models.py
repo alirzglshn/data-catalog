@@ -64,9 +64,12 @@ class Etl(TimeStampedModel):
 class TableName(TimeStampedModel):
     """a catalogued table, tied to the schema it lives in and the etl
 
-    job that loads it. the (schema, name) pair is unique since two
-    schemas may legitimately have same-named tables, but the same
-    table can only be registered once per schema
+    job that loads it. the (schema, name) pair is unique per schema,
+    enforced case-insensitively so "orders" and "Orders" in the same
+    schema are treated as the same table. that uniqueness is enforced
+    by a raw sql functional unique index (see migration 0003), not by
+    a Meta.constraints entry, since UniqueConstraint has no way to
+    express an index over lower(name)
     """
 
     name = models.CharField(max_length=255)
@@ -76,9 +79,6 @@ class TableName(TimeStampedModel):
     class Meta:
         db_table = "tables_name"
         ordering = ["schema__name", "name"]
-        constraints = [
-            models.UniqueConstraint(fields=["schema", "name"], name="unique_table_per_schema")
-        ]
 
     def __str__(self):
         return f"{self.schema.name}.{self.name}"

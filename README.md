@@ -1,9 +1,10 @@
-# Mini data catalog
+# mini data catalog
 
-A small metadata catalog service. it tracks which database schemas
+A  metadata catalog service that tracks which database schemas
 exist, which tables live in each schema, and which etl job is
 responsible for loading each table. tables, schemas and etl jobs are
 related through real foreign keys rather than free-text columns.
+
 
 ## project structure
 
@@ -31,17 +32,25 @@ related through real foreign keys rather than free-text columns.
 ├── catalog/                     # the actual data catalog app
 │   ├── models.py                # Schema, Etl, TableName
 │   ├── serializers.py
-│   ├── services.py              # csv/json parsing + upsert logic
-│   ├── views.py                 # IngestTablesView, EtlTablesView
+│   ├── services.py              # csv/json parsing, external-db metadata
+│   │                             reads, and the schema summary query
+│   ├── views.py                 # IngestTablesView, DirectDatabaseIngestView,
+│   │                             EtlTablesView, SchemaSummaryView
 │   ├── exceptions.py            # shared drf error shape
 │   ├── admin.py                 # django admin registration
 │   ├── management/commands/
 │   │   └── seed_etl_names.py    # loads etl_names.csv
 │   ├── migrations/
+│   │   ├── 0001_initial.py
+│   │   ├── 0002_case_insensitive_unique_names.py
+│   │   ├── 0003_case_insensitive_table_uniqueness.py
+│   │   └── 0004_table_created_at_index.py
 │   └── tests/
-│       ├── test_models.py       # fk/constraint behaviour
-│       ├── test_services.py     # parsing + upsert logic, incl. blank-field validation
-│       └── test_views.py        # http-level, including auth
+│       ├── test_models.py               # fk/constraint behaviour
+│       ├── test_services.py             # parsing + upsert logic, incl. blank-field validation
+│       ├── test_views.py                # http-level, including auth
+│       ├── test_direct_database_ingest.py  # external-db ingestion, mocked connection
+│       └── test_schema_summary.py          # join/aggregation endpoint
 │
 ├── postfix/                     # minimal internal mail relay
 │   ├── Dockerfile
@@ -82,7 +91,58 @@ ingestion also rejects rows where `name`, `schema_name`, or
 `etl_name` is present but blank, rather than silently creating a
 `Schema` or `Etl` row named `""`. a value that is entirely missing
 from a row and one that is an empty string are treated as the same
-problem.
+problem, this applies identically whether the rows came from an
+uploaded csv/json body or were discovered by reading an external
+database's own metadata (see [direct-database
+ingestion](#post-apiv1catalogingestdatabase) below), both paths
+converge on the same `ingest_rows` upsert.
+
+## indexes and constraints
+
+three indexing decisions were made deliberately after the initial
+migration, each shipped as its own raw sql migration
+(`migrations.RunSQL`) rather than an orm field change, since all
+three rely on a postgres functional expression (`LOWER(name)`) that
+django's `UniqueConstraint` cannot express directly:
+
+- **`0002_case_insensitive_unique_names`** — replaces the plain
+  case-sensitive `unique=True` btree index on `Schema.name` and
+  `Etl.name` with a unique index over `LOWER(name)`. without this,
+  `"sales"` and `"Sales"` could exist as two different schema rows,
+  which is a data-quality bug for a catalog table, not just a missing
+  performance index.
+- **`0003_case_insensitive_table_uniqueness`** — replaces the
+  original `unique_table_per_schema` constraint from `0001` (plain,
+  case-sensitive, over `(schema_id, name)`) with a case-insensitive
+  equivalent, `CREATE UNIQUE INDEX ... ON tables_name (schema_id,
+  LOWER(name))`. the old constraint is dropped rather than kept
+  alongside the new one, two overlapping unique indexes over almost
+  the same columns would only add write overhead with no additional
+  guarantee. the drop and the model's `Meta.constraints` entry are
+  kept in sync via `SeparateDatabaseAndState`, so `makemigrations`
+  does not see `models.py` and the recorded migration state as
+  disagreeing after this change.
+- **`0004_table_created_at_index`** — a plain (non-unique) btree
+  index on `TableName.created_at`, added for "which tables were
+  loaded in the last N days" style queries, which had no index
+  backing them at all before this.
+
+not added, and left to the automatic ones django already creates: a
+non-unique index on each foreign key column (`schema_id`, `etl_id` on
+`TableName`) is created automatically for every `ForeignKey`, and a
+unique index backs every primary key. no additional indexing was
+needed on top of those for the query patterns this project's
+endpoints actually use, including the new per-schema summary
+endpoint below, which relies entirely on those existing foreign-key
+indexes plus `Count(..., distinct=True)`, not a new index.
+
+because `ingest_rows` now upserts against database-level
+case-insensitive uniqueness, the lookup logic in
+`catalog/services.py` uses `name__iexact` rather than a plain
+`get_or_create(name=...)`, a case-only variant of an existing schema
+or etl name (e.g. re-ingesting `"Sales"` after `"sales"` already
+exists) is treated as the same row and reuses it, rather than
+raising `IntegrityError` against the new index.
 
 ## api
 
@@ -136,12 +196,107 @@ below) and returns:
 }
 ```
 
+### `POST /api/v1/catalog/ingest/database/`
+
+registers tables by reading them straight out of an **external**
+postgres or oracle database's own metadata, rather than from an
+uploaded csv/json body. this is the counterpart to
+`POST /api/v1/catalog/ingest/` for the "read the data directly from
+postgres or oracle" case: the caller supplies connection details for
+a database it wants scanned, and every table that connection can see
+is registered under a single etl job supplied in the same request.
+
+request body:
+
+```json
+{
+  "engine": "postgres",
+  "host": "warehouse.internal",
+  "port": 5432,
+  "database": "sales_db",
+  "user": "readonly",
+  "password": "secret",
+  "etl_name": "etl9"
+}
+```
+
+`engine` is either `"postgres"` or `"oracle"`. behind the scenes:
+
+- **postgres** — connects with `psycopg2` and reads
+  `information_schema.tables`, filtered to `table_type = 'BASE
+  TABLE'` and excluding the `pg_catalog`/`information_schema` system
+  schemas, so only application tables are discovered.
+- **oracle** — connects with `python-oracledb` (thin mode, no oracle
+  instant client install required) and reads `all_tables`, which is
+  already scoped to whatever the connecting user has visibility into.
+
+every `(schema_name, table_name)` pair found is fed through the exact
+same `ingest_rows` upsert that the csv/json endpoint uses, so
+case-insensitive matching, idempotent re-ingestion, and the
+create-vs-update counts all behave identically regardless of which
+endpoint populated the catalog. the response shape is the same
+`IngestionResultSerializer` summary shown above.
+
+connection failures (bad host, refused connection, authentication
+failure, unreachable network) are caught and returned as a `502`
+with a `detail` message, not a raw `500`, since the failure is on the
+external database's side, not the catalog's own database or request
+handling. a database with no tables visible to the connecting user
+returns `400`.
+
+**why this needed to be its own endpoint** rather than reusing
+`POST /api/v1/catalog/ingest/`: the existing ingest endpoint's
+contract is "the caller already knows the schema/table/etl names and
+is handing them over as rows" (csv or json). this endpoint's contract
+is the opposite: the caller does *not* know the table names ahead of
+time, it hands over *connection credentials* instead, and the names
+are discovered at request time by querying the target database's own
+catalog view. that's a different input shape, a different failure
+mode (an external network/auth failure vs. a malformed payload), and
+a different response code for that failure (`502` vs `400`), so it
+gets a dedicated `ExternalConnectionSerializer` and view rather than
+being folded into the existing one.
+
 ### `GET /api/v1/catalog/etl-tables/?etl_name=etl1`
 returns the tables that a given etl job populates. a name that does
 not exist in the catalog returns `404`, not an empty list, since those
 are different situations for the caller (the job has no tables yet
 vs. the job was never registered). a name that exists but has no
 tables pointing at it yet correctly returns `200` with an empty list.
+
+### `GET /api/v1/catalog/schema-summary/`
+
+**deliberate multi-table join example.** returns a per-schema rollup
+of how many tables exist in that schema and how many *distinct* etl
+jobs populate them, computed in a single query across `Schema`,
+`TableName`, and `Etl`:
+
+```json
+[
+  { "id": 1, "name": "hr", "table_count": 1, "etl_count": 1 },
+  { "id": 2, "name": "sales", "table_count": 3, "etl_count": 2 }
+]
+```
+
+implemented as one annotated queryset
+(`catalog/services.py::schema_summary_queryset`):
+
+```python
+Schema.objects.annotate(
+    table_count=Count("tables", distinct=True),
+    etl_count=Count("tables__etl", distinct=True),
+).order_by("name")
+```
+
+`Count("tables", ...)` walks the `Schema -> TableName` reverse
+foreign key, and `Count("tables__etl", ...)` walks
+`Schema -> TableName -> Etl` in the same query, so postgres performs
+the join and the counting server-side in one round trip. this is
+intentionally not implemented as "fetch all schemas, then loop and
+count tables/etl per schema in python" (which would be n+1 queries),
+and `distinct=True` on the etl count is what makes a schema with five
+tables all loaded by the same etl job correctly report `1` distinct
+etl job rather than `5`.
 
 ## running it
 
@@ -176,7 +331,8 @@ tables pointing at it yet correctly returns `200` with an empty list.
 
 ## email setup
 
-the ingestion endpoint sends a summary email after every successful
+the ingestion endpoints (both the csv/json upload and the
+direct-database endpoint) send a summary email after every successful
 load. two delivery options are supported through `.env`, both use the
 same `EMAIL_*` settings so no code changes are needed to switch:
 
@@ -223,9 +379,14 @@ already contains:
 - **catalog / ingest tables (csv upload)** — attach a csv file to the
   `file` form field before sending, the request will otherwise send
   with no file attached
+- **catalog / ingest from external database** — a ready-to-send
+  example body pointing at a postgres connection; swap `engine` to
+  `"oracle"` and adjust `port`/credentials to test against an oracle
+  instance instead
 - **catalog / tables for an etl job** — the lookup endpoint
 - **catalog / tables for an unknown etl job (expect 404)** — the
   not-found case
+- **catalog / schema summary** — the join/aggregation endpoint
 
 run "obtain token" first, the access token is then reused
 automatically by the other requests through the `{{access_token}}`
@@ -243,7 +404,7 @@ after the first run it reuses the same test database instead of
 rebuilding it from migrations every time, pass `--create-db` once if
 migrations have changed and the cached test database is stale.
 
-37 tests cover three layers independently:
+49 tests cover five layers independently:
 
 - `test_models.py` (7 tests) — fk/uniqueness constraints at the
   database level, including that deleting a schema cascades and that
@@ -256,6 +417,19 @@ migrations have changed and the cached test database is stale.
   empty-list distinction, and that a successful ingest actually sends
   an email (checked against django's in-memory test mailbox, no real
   smtp call happens during the test run)
+- `test_direct_database_ingest.py` (8 tests) — the external-db
+  ingestion endpoint, with `discover_external_tables` mocked so no
+  real postgres/oracle connection is made during the test run: covers
+  successful discovery-and-registration for both engines, idempotent
+  re-scanning, an unsupported engine being rejected before any
+  connection attempt, a missing required field, authentication being
+  required, and (critically) a connection failure returning `502`
+  rather than raising an unhandled exception
+- `test_schema_summary.py` (4 tests) — the join/aggregation endpoint,
+  confirming `table_count` and `etl_count` are correct per schema,
+  that a schema with zero tables reports zero rather than erroring,
+  and specifically that many tables sharing one etl job report
+  `etl_count == 1` rather than the row count
 
 ## code style
 
@@ -272,3 +446,39 @@ matching line length and `E203`/`W503` ignored, since both conflict
 with choices black itself makes around slices and line breaks before
 binary operators.
 
+## known limitations / things to point out in review
+
+- `_notify_by_email` only swallows `smtplib.SMTPException` and
+  `OSError`, not every exception, so a genuine bug in the notification
+  code itself would still surface instead of being silently hidden.
+  the failure is logged (`logger.exception`) rather than passed over
+  entirely, so a down mail relay is visible in the logs without
+  turning a successful ingestion into a `500`.
+- `ingest_rows` uses `update_or_create`, so re-ingesting the same
+  `(schema, name)` pair overwrites its etl assignment rather than
+  rejecting the change. this matches "re-running an etl load should
+  be idempotent", but a stricter mode that flags conflicting
+  reassignments could be added if that is not the desired behaviour.
+- migrations `0002`-`0004` use raw postgres sql (`LOWER()` functional
+  indexes and `ALTER TABLE ... DROP CONSTRAINT`), they will not apply
+  against sqlite. this is intentional, the project targets postgres
+  in every environment including tests, but it does mean the test
+  suite cannot fall back to sqlite if postgres is ever unavailable.
+- `DirectDatabaseIngestView` sends the external database's plaintext
+  password through the request body and holds it only in memory for
+  the duration of the request, it is never persisted or logged. over
+  a real network this endpoint should only ever be exposed behind
+  tls, the same as every other endpoint in this api.
+- `discover_external_tables` opens a new connection per request and
+  closes it in a `finally` block immediately after reading metadata,
+  there is no connection pooling since this endpoint is expected to
+  be called occasionally (once per external database scan), not on a
+  hot path.
+- the docker build/compose files were validated for yaml/dockerfile
+  syntax and the application itself was fully tested locally against
+  a real database (migrations, seeding, all automated tests, and
+  manual runs against every endpoint including auth failure and 404
+  cases), but the containers themselves were not run end-to-end in
+  the environment this was developed in, since it had no docker
+  daemon available. worth a final `docker compose up --build` pass
+  before submission to catch anything docker-specific.

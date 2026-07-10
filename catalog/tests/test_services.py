@@ -128,3 +128,23 @@ class TestIngestRows:
 
         assert Schema.objects.filter(name="sales").exists()
         assert TableName.objects.filter(name="orders").exists()
+
+    def test_reuses_existing_rows_on_case_only_difference(self):
+        # schemas/tables_name/etl all enforce case-insensitive
+        # uniqueness at the database level (migrations 0002, 0003),
+        # ingest_rows has to look rows up the same way or a
+        # case-variant re-ingest would raise IntegrityError instead
+        # of being treated as the same row
+        Schema.objects.create(name="sales")
+        Etl.objects.create(name="etl1")
+
+        rows = [{"name": "orders", "schema_name": "Sales", "etl_name": "ETL1"}]
+        result = ingest_rows(rows)
+
+        assert result["created"] == 1
+        assert Schema.objects.count() == 1
+        assert Etl.objects.count() == 1
+        # the original casing is preserved, not overwritten by the
+        # differently-cased value from the second ingest
+        assert Schema.objects.get().name == "sales"
+        assert Etl.objects.get().name == "etl1"

@@ -99,6 +99,36 @@
           }
         },
         {
+          "name": "ingest from external database (postgres)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"engine\": \"postgres\",\n  \"host\": \"warehouse.internal\",\n  \"port\": 5432,\n  \"database\": \"sales_db\",\n  \"user\": \"readonly\",\n  \"password\": \"secret\",\n  \"etl_name\": \"etl9\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/catalog/ingest/database/"
+          }
+        },
+        {
+          "name": "ingest from external database (oracle)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"engine\": \"oracle\",\n  \"host\": \"warehouse.internal\",\n  \"port\": 1521,\n  \"database\": \"ORCLPDB1\",\n  \"user\": \"readonly\",\n  \"password\": \"secret\",\n  \"etl_name\": \"etl9\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/catalog/ingest/database/"
+          }
+        },
+        {
           "name": "tables for an etl job",
           "request": {
             "method": "GET",
@@ -112,6 +142,14 @@
             "method": "GET",
             "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
             "url": "{{base_url}}/api/v1/catalog/etl-tables/?etl_name=does-not-exist"
+          }
+        },
+        {
+          "name": "schema summary",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/api/v1/catalog/schema-summary/"
           }
         }
       ]

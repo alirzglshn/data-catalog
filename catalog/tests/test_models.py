@@ -48,6 +48,37 @@ def test_duplicate_table_name_within_same_schema_is_rejected():
         TableName.objects.create(name="orders", schema=schema, etl=etl)
 
 
+def test_schema_name_uniqueness_is_case_insensitive():
+    # enforced by the functional unique index added in migration 0002
+    # (CREATE UNIQUE INDEX ... ON schemas (LOWER(name))), a postgres
+    # only construct, this test therefore only passes when the test
+    # suite runs against postgres, which is what pytest.ini/settings
+    # point at by default
+    Schema.objects.create(name="sales")
+    with pytest.raises(IntegrityError):
+        Schema.objects.create(name="Sales")
+
+
+def test_etl_name_uniqueness_is_case_insensitive():
+    # same as above, backed by migration 0002's functional index on
+    # etl (LOWER(name))
+    Etl.objects.create(name="etl1")
+    with pytest.raises(IntegrityError):
+        Etl.objects.create(name="ETL1")
+
+
+def test_table_name_uniqueness_is_case_insensitive_within_schema():
+    # backed by migration 0003's functional index on
+    # tables_name (schema_id, LOWER(name)), which replaced the plain
+    # case-sensitive UniqueConstraint from 0001
+    schema = Schema.objects.create(name="sales")
+    etl = Etl.objects.create(name="etl1")
+    TableName.objects.create(name="orders", schema=schema, etl=etl)
+
+    with pytest.raises(IntegrityError):
+        TableName.objects.create(name="Orders", schema=schema, etl=etl)
+
+
 def test_deleting_schema_cascades_to_its_tables():
     schema = Schema.objects.create(name="sales")
     etl = Etl.objects.create(name="etl1")

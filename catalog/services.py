@@ -9,14 +9,48 @@ import csv
 import io
 
 from django.db import transaction
+from django.db.models import Count
 
 from catalog.models import Etl, Schema, TableName
 
 REQUIRED_FIELDS = {"name", "schema_name", "etl_name"}
 
+SUPPORTED_ENGINES = {"postgres", "oracle"}
+
+# discovers user tables only, the catalog is tracking application
+# schemas, not postgres's own system catalog. system schemas are
+# excluded up front rather than filtered out row by row later
+POSTGRES_METADATA_QUERY = """
+    SELECT table_schema, table_name
+    FROM information_schema.tables
+    WHERE table_type = 'BASE TABLE'
+      AND table_schema NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY table_schema, table_name
+"""
+
+# all_tables is scoped to whatever the connecting user can see, which
+# is exactly the "what does this account have access to" answer the
+# catalog wants, oracle has no separate table_type column the way
+# postgres does since all_tables only ever lists base tables anyway
+ORACLE_METADATA_QUERY = """
+    SELECT owner, table_name
+    FROM all_tables
+    ORDER BY owner, table_name
+"""
+
 
 class PayloadFormatError(Exception):
     """raised when the request body can't be parsed as csv or json"""
+
+
+class ExternalConnectionError(Exception):
+    """raised when connecting to or querying an external database fails
+
+    covers everything from a bad host/port to an authentication
+    failure to a query timing out, the view layer only needs to know
+    that the external side failed, not which driver-specific
+    exception caused it
+    """
 
 
 def _validate_row(row, index):
@@ -104,14 +138,25 @@ def ingest_rows(rows):
     touched_etl_names = set()
 
     for row in rows:
-        schema, _ = Schema.objects.get_or_create(name=row["schema_name"].strip())
-        etl, _ = Etl.objects.get_or_create(name=row["etl_name"].strip())
-
-        table, was_created = TableName.objects.update_or_create(
-            schema=schema,
-            name=row["name"].strip(),
-            defaults={"etl": etl},
+        schema_name = row["schema_name"].strip()
+        schema, _ = Schema.objects.get_or_create(
+            name__iexact=schema_name, defaults={"name": schema_name}
         )
+
+        etl_name = row["etl_name"].strip()
+        etl, _ = Etl.objects.get_or_create(name__iexact=etl_name, defaults={"name": etl_name})
+
+        table_name = row["name"].strip()
+        table, was_created = (
+            TableName.objects.filter(schema=schema, name__iexact=table_name).first(),
+            False,
+        )
+        if table is None:
+            table = TableName.objects.create(schema=schema, name=table_name, etl=etl)
+            was_created = True
+        else:
+            table.etl = etl
+            table.save(update_fields=["etl", "updated_at"])
 
         touched_etl_names.add(etl.name)
         created_tables.append((table, was_created))
@@ -123,3 +168,122 @@ def ingest_rows(rows):
         "etl_names": sorted(touched_etl_names),
         "tables": [table for table, _ in created_tables],
     }
+
+
+def _connect_postgres(connection_info):
+    """open a connection to an external postgres database
+
+    a short connect_timeout is set on purpose, a request thread
+    should not hang for the platform default (which can be minutes)
+    just because a host/port is unreachable, the caller gets a clear
+    ExternalConnectionError instead
+    """
+
+    import psycopg2
+
+    try:
+        return psycopg2.connect(
+            host=connection_info["host"],
+            port=connection_info["port"],
+            dbname=connection_info["database"],
+            user=connection_info["user"],
+            password=connection_info["password"],
+            connect_timeout=5,
+        )
+    except psycopg2.Error as exc:
+        raise ExternalConnectionError(f"could not connect to postgres database: {exc}") from exc
+
+
+def _connect_oracle(connection_info):
+    """open a connection to an external oracle database
+
+    uses python-oracledb in thin mode, which speaks the oracle wire
+    protocol directly and needs no instant client install, that
+    matters for this project specifically since the app container
+    should not need an extra oracle client layer just to support this
+    endpoint
+    """
+
+    import oracledb
+
+    dsn = oracledb.makedsn(
+        connection_info["host"], connection_info["port"], service_name=connection_info["database"]
+    )
+    try:
+        return oracledb.connect(
+            user=connection_info["user"], password=connection_info["password"], dsn=dsn
+        )
+    except oracledb.Error as exc:
+        raise ExternalConnectionError(f"could not connect to oracle database: {exc}") from exc
+
+
+def discover_external_tables(connection_info):
+    """connect to an external database and list its schema/table pairs
+
+    connection_info is expected to already be validated (see
+    catalog.serializers.ExternalConnectionSerializer), so this only
+    handles the parts that can fail at request time: reaching the
+    host, authenticating, and running the metadata query. any of
+    those raise ExternalConnectionError with the underlying driver
+    error folded in, rather than letting a raw psycopg2/oracledb
+    exception surface to the view
+
+    returns a list of (schema_name, table_name) tuples
+    """
+
+    engine = connection_info["engine"]
+
+    if engine == "postgres":
+        connect, query = _connect_postgres, POSTGRES_METADATA_QUERY
+    elif engine == "oracle":
+        connect, query = _connect_oracle, ORACLE_METADATA_QUERY
+    else:
+        raise ExternalConnectionError(f"unsupported engine: {engine}")
+
+    connection = connect(connection_info)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            return [(schema_name, table_name) for schema_name, table_name in cursor.fetchall()]
+    except Exception as exc:
+        raise ExternalConnectionError(f"failed reading table metadata: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def rows_from_external_tables(discovered_tables, etl_name):
+    """turn (schema_name, table_name) pairs into ingest_rows() input
+
+    the external database has no concept of "which etl job loads
+    this table", that is a catalog-side decision, so the caller
+    supplies a single etl_name up front and every discovered table is
+    attributed to it, matching how a real load would work: one
+    connection-scan is one etl run
+    """
+
+    return [
+        {"name": table_name, "schema_name": schema_name, "etl_name": etl_name}
+        for schema_name, table_name in discovered_tables
+    ]
+
+
+def schema_summary_queryset():
+    """per-schema rollup of table count and distinct etl jobs used
+
+    deliberately a single query across all three catalog tables
+    rather than one query per schema looped in python: Count("tables")
+    walks the Schema -> TableName reverse fk, and
+    Count("tables__etl", distinct=True) walks Schema -> TableName ->
+    Etl in the same query, so postgres does the join and the counting
+    in one round trip instead of the view issuing n+1 queries
+
+    distinct=True on the etl count matters specifically because a
+    schema with five tables all loaded by the same etl job should
+    report 1 distinct etl job, not 5, without it Count would tally
+    every joined row rather than every distinct etl id
+    """
+
+    return Schema.objects.annotate(
+        table_count=Count("tables", distinct=True),
+        etl_count=Count("tables__etl", distinct=True),
+    ).order_by("name")

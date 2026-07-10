@@ -1,9 +1,12 @@
 """api views for the data catalog
 
-two endpoints live here:
+four endpoints live here:
 
-* IngestTablesView   -- POST, accepts csv or json, registers tables
-* EtlTablesView      -- GET,  given an etl name, lists tables using it
+* IngestTablesView       -- POST, accepts csv or json, registers tables
+* DirectDatabaseIngestView -- POST, reads an external db's own table
+                               metadata and registers it
+* EtlTablesView          -- GET,  given an etl name, lists tables using it
+* SchemaSummaryView      -- GET,  per-schema table/etl rollup (join example)
 """
 
 import logging
@@ -19,12 +22,21 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from catalog.models import Etl, TableName
-from catalog.serializers import IngestionResultSerializer, TableNameSerializer
+from catalog.serializers import (
+    ExternalConnectionSerializer,
+    IngestionResultSerializer,
+    SchemaSummarySerializer,
+    TableNameSerializer,
+)
 from catalog.services import (
+    ExternalConnectionError,
     PayloadFormatError,
+    discover_external_tables,
     ingest_rows,
     normalize_json_rows,
     parse_csv_rows,
+    rows_from_external_tables,
+    schema_summary_queryset,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,6 +105,50 @@ class IngestTablesView(APIView):
             logger.exception("failed to send ingestion notification email")
 
 
+class DirectDatabaseIngestView(APIView):
+    """reads schema/table metadata straight from an external database
+
+    and registers it in the catalog, the counterpart to
+    IngestTablesView for the case where the caller wants to point at
+    a live postgres or oracle database rather than upload rows
+
+    the request body carries connection details plus a single
+    etl_name to attribute every discovered table to, see
+    ExternalConnectionSerializer for the exact shape. every table
+    the connecting user can see is registered, there is no filtering
+    by name pattern, that can be layered on later if a real load only
+    ever wants a subset
+
+    a connection or query failure against the external database
+    returns 502, not 500, the catalog's own database and this
+    request's processing are both fine, it is specifically the
+    remote/upstream side that failed
+    """
+
+    def post(self, request, *args, **kwargs):
+        connection_serializer = ExternalConnectionSerializer(data=request.data)
+        connection_serializer.is_valid(raise_exception=True)
+        connection_info = connection_serializer.validated_data
+
+        try:
+            discovered_tables = discover_external_tables(connection_info)
+        except ExternalConnectionError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        if not discovered_tables:
+            return Response(
+                {"detail": "no tables found in the external database"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        rows = rows_from_external_tables(discovered_tables, connection_info["etl_name"])
+        result = ingest_rows(rows)
+        IngestTablesView._notify_by_email(result)
+
+        serializer = IngestionResultSerializer(result)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
 class EtlTablesView(ListAPIView):
     """given ?etl_name=..., returns the tables that etl job populates
 
@@ -115,3 +171,19 @@ class EtlTablesView(ListAPIView):
             raise NotFound(f"no etl job named '{etl_name}' in the catalog")
 
         return TableName.objects.filter(etl=etl).select_related("schema", "etl")
+
+
+class SchemaSummaryView(ListAPIView):
+    """per-schema rollup of table count and distinct etl jobs used
+
+    deliberate multi-table join example: a single annotated query
+    across Schema, TableName, and Etl (see
+    catalog.services.schema_summary_queryset), rather than the view
+    fetching schemas and then looping to count tables/etl jobs one
+    schema at a time
+    """
+
+    serializer_class = SchemaSummarySerializer
+
+    def get_queryset(self):
+        return schema_summary_queryset()

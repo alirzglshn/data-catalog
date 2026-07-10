@@ -3,9 +3,7 @@ from django.urls import include, path
 from django.conf import settings
 from django.conf.urls.static import static
 
-# everything under /api/v1/ is versioned so future breaking changes
-# (a v2 response shape, for example) can be added alongside this one
-# instead of replacing it outright
+# root urls.py with api versioning
 v1_patterns = [
     path("auth/", include("accounts.urls")),
     path("catalog/", include("catalog.urls")),
