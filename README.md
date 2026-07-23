@@ -446,39 +446,3 @@ matching line length and `E203`/`W503` ignored, since both conflict
 with choices black itself makes around slices and line breaks before
 binary operators.
 
-## known limitations / things to point out in review
-
-- `_notify_by_email` only swallows `smtplib.SMTPException` and
-  `OSError`, not every exception, so a genuine bug in the notification
-  code itself would still surface instead of being silently hidden.
-  the failure is logged (`logger.exception`) rather than passed over
-  entirely, so a down mail relay is visible in the logs without
-  turning a successful ingestion into a `500`.
-- `ingest_rows` uses `update_or_create`, so re-ingesting the same
-  `(schema, name)` pair overwrites its etl assignment rather than
-  rejecting the change. this matches "re-running an etl load should
-  be idempotent", but a stricter mode that flags conflicting
-  reassignments could be added if that is not the desired behaviour.
-- migrations `0002`-`0004` use raw postgres sql (`LOWER()` functional
-  indexes and `ALTER TABLE ... DROP CONSTRAINT`), they will not apply
-  against sqlite. this is intentional, the project targets postgres
-  in every environment including tests, but it does mean the test
-  suite cannot fall back to sqlite if postgres is ever unavailable.
-- `DirectDatabaseIngestView` sends the external database's plaintext
-  password through the request body and holds it only in memory for
-  the duration of the request, it is never persisted or logged. over
-  a real network this endpoint should only ever be exposed behind
-  tls, the same as every other endpoint in this api.
-- `discover_external_tables` opens a new connection per request and
-  closes it in a `finally` block immediately after reading metadata,
-  there is no connection pooling since this endpoint is expected to
-  be called occasionally (once per external database scan), not on a
-  hot path.
-- the docker build/compose files were validated for yaml/dockerfile
-  syntax and the application itself was fully tested locally against
-  a real database (migrations, seeding, all automated tests, and
-  manual runs against every endpoint including auth failure and 404
-  cases), but the containers themselves were not run end-to-end in
-  the environment this was developed in, since it had no docker
-  daemon available. worth a final `docker compose up --build` pass
-  before submission to catch anything docker-specific.
